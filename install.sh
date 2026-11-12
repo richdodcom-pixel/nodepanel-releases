@@ -32,6 +32,7 @@ while [ $# -gt 0 ]; do
 done
 say() { printf '\033[1;32m▶ %s\033[0m\n' "$*"; }
 die() { printf '\033[1;31m✖ %s\033[0m\n' "$*" >&2; exit 1; }
+info() { printf '  %s\n' "$*"; }
 busy() { ss -tlnH "( sport = :$1 )" 2>/dev/null | grep -q .; }
 
 [ "$(id -u)" = 0 ] || die "запустите под root (или через sudo)"
@@ -52,8 +53,12 @@ if [ -z "$NO_UPGRADE" ] && command -v apt-get >/dev/null; then
   APT_LOG=/var/log/nodepanel-install-apt.log
   export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a
   APT=(apt-get -y -o DPkg::Lock::Timeout=600 -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold)
-  "${APT[@]}" update >"$APT_LOG" 2>&1 || die "apt update не удался — подробности: $APT_LOG"
-  "${APT[@]}" upgrade >>"$APT_LOG" 2>&1 || die "apt upgrade не удался — подробности: $APT_LOG (можно повторить с --no-upgrade)"
+  info "вывод apt — ниже и в $APT_LOG; если apt занят автообновлениями, жду до 10 минут"
+  "${APT[@]}" update 2>&1 | tee "$APT_LOG" || die "apt update не удался — подробности: $APT_LOG"
+  "${APT[@]}" upgrade 2>&1 | tee -a "$APT_LOG" || die "apt upgrade не удался — подробности: $APT_LOG (можно повторить с --no-upgrade)"
+  info "система обновлена"
+else
+  info "обновление системы пропущено"
 fi
 
 # --- программа
@@ -62,11 +67,13 @@ TMP="$(mktemp)"; trap 'rm -f "$TMP"' EXIT
 if [ -n "$BINARY" ]; then
   cp "$BINARY" "$TMP"
 elif [ -n "$URL" ]; then
-  curl -fsSL -o "$TMP" "$URL"
+  info "скачиваю $URL"
+  curl -fL --progress-bar -o "$TMP" "$URL" || die "не удалось скачать $URL"
 elif [ -n "$REPO" ]; then
   # последний выпуск на GitHub + проверка суммы из SHA256SUMS
   REL="https://github.com/$REPO/releases/latest/download"
-  curl -fsSL -o "$TMP" "$REL/nodepanel-linux-$ARCH" || die "не удалось скачать $REL/nodepanel-linux-$ARCH"
+  info "скачиваю $REL/nodepanel-linux-$ARCH"
+  curl -fL --progress-bar -o "$TMP" "$REL/nodepanel-linux-$ARCH" || die "не удалось скачать $REL/nodepanel-linux-$ARCH"
   SHA="$(curl -fsSL "$REL/SHA256SUMS" | awk -v f="nodepanel-linux-$ARCH" '$2==f {print $1}')"
   [ -n "$SHA" ] || die "в выпуске нет SHA256SUMS для $ARCH"
 else
@@ -74,11 +81,14 @@ else
 fi
 if [ -n "$SHA" ]; then
   [ "$(sha256sum "$TMP" | cut -d' ' -f1)" = "$SHA" ] || die "контрольная сумма не совпала"
+  info "контрольная сумма совпала (sha256 ${SHA:0:16}…)"
 fi
-chmod 755 "$TMP"; "$TMP" version >/dev/null || die "файл не запускается — не та архитектура?"
+chmod 755 "$TMP"; VER="$("$TMP" version 2>/dev/null)" || die "файл не запускается — не та архитектура?"
 install -m 0755 "$TMP" /usr/local/bin/nodepanel
+info "установлено: /usr/local/bin/nodepanel — $VER"
 
 # --- адрес и домен
+say "Адрес сервера и домен"
 IP="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") {print $(i+1); exit}}')"
 case "$IP" in
   ""|10.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*|192.168.*|100.6[4-9].*|100.[7-9][0-9].*|100.1[01][0-9].*|100.12[0-7].*)
@@ -89,12 +99,16 @@ esac
 [ -n "$DOMAIN" ] || DOMAIN="${IP//./-}.sslip.io"
 RESOLVED="$(getent ahostsv4 "$DOMAIN" | awk 'NR==1{print $1}' || true)"
 [ "$RESOLVED" = "$IP" ] || die "домен $DOMAIN указывает на '${RESOLVED:-ничего}', а IP сервера $IP — проверьте DNS"
+info "IP сервера: $IP"
+info "домен: $DOMAIN (указывает на $RESOLVED — верно)"
 
 # --- порты
+say "Порты"
 [ -n "$PORT" ] || PORT=$(( 20000 + RANDOM % 40000 ))
 for p in 80 "$PORT" "$AGENT_PORT" "$SUB_PORT"; do
   busy "$p" && die "порт $p занят — освободите его или укажите другой (--port)"
 done
+info "панель: $PORT, проверка Let's Encrypt: 80, ноды: $AGENT_PORT, подписки: $SUB_PORT — свободны"
 for p in 443 8443; do busy "$p" && echo "  внимание: порт $p занят — точки подключения на нём (если нода тоже здесь) не заработают" >&2; done
 
 # --- настройки
@@ -114,9 +128,12 @@ acme_email: "$EMAIL"
 CFG
 [ -n "$REPO" ] && echo "update_repo: $REPO" >> /etc/nodepanel/panel.yaml
 
+info "создан /etc/nodepanel/panel.yaml"
 /usr/local/bin/nodepanel admin -data /var/lib/nodepanel templates defaults "$SNI" >/dev/null
+info "шаблоны точек подключения: VLESS Reality RAW (443) и XHTTP (8443), маскировка под $SNI"
 PASS_LINE="$(/usr/local/bin/nodepanel admin -data /var/lib/nodepanel admin add admin | sed -n 's/^Пароль.*: //p')"
 [ -n "$PASS_LINE" ] || die "не удалось создать администратора"
+info "создан администратор admin"
 
 # --- служба
 say "Служба nodepanel-panel"
@@ -136,15 +153,39 @@ LimitNOFILE=1048576
 WantedBy=multi-user.target
 UNIT
 systemctl daemon-reload
-systemctl enable --now nodepanel-panel >/dev/null 2>&1
+systemctl enable --now nodepanel-panel >/dev/null 2>&1 || die "служба не запустилась — смотрите: journalctl -u nodepanel-panel -n 50"
+info "служба включена и запущена ($(systemctl is-active nodepanel-panel))"
 
-say "Жду сертификат Let's Encrypt и запуск панели"
+say "Жду сертификат Let's Encrypt и запуск панели (до 3 минут)"
+info "журнал панели — ниже:"
 URL_PANEL="https://$DOMAIN:$PORT$BASE/"
-for _ in $(seq 1 60); do
+( journalctl -u nodepanel-panel -f -n 20 --no-pager -o cat 2>/dev/null | sed -u 's/^/    │ /' ) &
+JPID=$!
+stop_log() { pkill -P "$JPID" 2>/dev/null || true; kill "$JPID" 2>/dev/null || true; wait "$JPID" 2>/dev/null || true; }
+trap 'rm -f "$TMP"; stop_log' EXIT
+OK=""
+for i in $(seq 1 90); do
   if curl -fsS --max-time 3 -o /dev/null "https://$DOMAIN:$PORT$BASE/healthz" 2>/dev/null; then OK=1; break; fi
+  [ $((i % 8)) -eq 0 ] && info "…ещё жду ($((i * 2)) с)"
   sleep 2
 done
-[ "${OK:-}" = 1 ] || die "панель не ответила по HTTPS за 2 минуты — смотрите: journalctl -u nodepanel-panel -n 50 (часто причина — закрытый порт 80)"
+stop_log
+if [ -z "$OK" ]; then
+  printf '\n\033[1;31m✖ панель не ответила по HTTPS за 3 минуты\033[0m\n\n'
+  echo "  Служба: $(systemctl is-active nodepanel-panel)"
+  echo "  Слушают порты:"; { ss -tlnp 2>/dev/null | grep nodepanel | awk '{print "    " $4}'; } || echo "    (ни одного)"
+  echo "  Последние строки журнала:"
+  journalctl -u nodepanel-panel -n 25 --no-pager -o cat 2>/dev/null | sed 's/^/    │ /' || true
+  echo
+  echo "  Частые причины:"
+  echo "    • у хостера закрыт порт 80 (внешний файрвол в личном кабинете) — Let's Encrypt не может проверить домен;"
+  echo "    • лимит Let's Encrypt на частые сертификаты для одного имени (в журнале: rateLimited / too many certificates) —"
+  echo "      подождать или указать свой домен: --domain panel.example.com;"
+  echo "    • сертификат ещё выдаётся — подождите пару минут и откройте: $URL_PANEL"
+  echo "  Полный журнал: journalctl -u nodepanel-panel -n 100 --no-pager"
+  exit 1
+fi
+info "панель отвечает по HTTPS, сертификат получен"
 
 cat > /root/nodepanel-admin.txt <<TXT
 Панель:  $URL_PANEL
