@@ -8,11 +8,12 @@
 Сервер с Ubuntu 22.04+ / Debian 12+, systemd, вход под root:
 
 ```bash
-bash <(curl -fsSL https://github.com/richdodcom-pixel/nodepanel-releases/releases/latest/download/install.sh)
+wget -qO nodepanel.sh https://raw.githubusercontent.com/richdodcom-pixel/nodepanel-releases/main/install.sh && bash nodepanel.sh
 ```
 
 В конце установщик покажет адрес панели, логин и пароль (они же — в `/root/nodepanel-admin.txt`).
-Свой домен: добавьте `--domain panel.example.com` после `install.sh)`.
+Свой домен: `bash nodepanel.sh --domain panel.example.com`.
+Сначала установщик обновляет систему (`apt update && apt upgrade`); пропустить: `bash nodepanel.sh --no-upgrade`.
 
 Ноды ставятся командой, которую панель показывает при добавлении ноды.
 Обновление панели — кнопкой «Обновить» в настройках (берёт последний выпуск отсюда).
