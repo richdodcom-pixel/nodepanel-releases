@@ -2,7 +2,11 @@
 # Установка панели nodepanel одной командой (Ubuntu/Debian, systemd, root).
 #
 #   bash install.sh [--domain sub.example.com] [--binary ./nodepanel | --url https://…/nodepanel-linux-amd64 --sha256 …]
-#                   [--email you@example.com] [--port 31234] [--sni www.microsoft.com] [--no-upgrade]
+#                   [--yes]  (без вопросов: без --domain — имя <IP>.sslip.io)
+#                   [--email you@example.com] [--port 31234] [--sni site.example.com] [--no-upgrade]
+#
+# По умолчанию шаблоны подключений маскируются под сайт самой ноды (домен ноды + сайт-приманка
+# с сертификатом Let's Encrypt). --sni — старый режим: маскировка всех нод под один чужой сайт.
 #
 # Без --domain используется бесплатное имя <IP-через-дефисы>.sslip.io — оно указывает на этот сервер,
 # и Let's Encrypt выдаёт на него настоящий сертификат (браузер не ругается).
@@ -10,7 +14,7 @@
 # В конце печатаются адрес панели, логин и пароль (они же — в /root/nodepanel-admin.txt).
 set -euo pipefail
 
-DOMAIN=""; BINARY=""; URL=""; SHA=""; EMAIL=""; PORT=""; SNI="www.microsoft.com"; NO_UPGRADE=""
+DOMAIN=""; BINARY=""; URL=""; SHA=""; EMAIL=""; PORT=""; SNI=""; ASSUME_YES=""; NO_UPGRADE=""
 # Репозиторий выпусков подставляется при сборке выпуска (.github/workflows/release.yml).
 REPO="${NODEPANEL_REPO:-richdodcom-pixel/nodepanel-releases}"
 # Метку заменяет только присваивание выше; проверяем по её части, чтобы sed при сборке не задел и эту строку.
@@ -25,8 +29,9 @@ while [ $# -gt 0 ]; do
     --email)  EMAIL="$2"; shift 2 ;;
     --port)   PORT="$2"; shift 2 ;;
     --sni)    SNI="$2"; shift 2 ;;
+    -y|--yes) ASSUME_YES=1; shift ;;
     --no-upgrade) NO_UPGRADE=1; shift ;;
-    -h|--help) sed -n '2,10p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,14p' "$0"; exit 0 ;;
     *) echo "неизвестный параметр: $1" >&2; exit 2 ;;
   esac
 done
@@ -96,8 +101,58 @@ case "$IP" in
     IP="$(curl -4 -fsS --max-time 10 https://api.ipify.org || true)" ;;
 esac
 [ -n "$IP" ] || die "не удалось определить внешний IP — укажите --domain"
-[ -n "$DOMAIN" ] || DOMAIN="${IP//./-}.sslip.io"
-RESOLVED="$(getent ahostsv4 "$DOMAIN" | awk 'NR==1{print $1}' || true)"
+SSLIP="${IP//./-}.sslip.io"
+resolved() { getent ahostsv4 "$1" | awk 'NR==1{print $1}' || true; }
+
+# Домен и сертификат. Вопросы — через /dev/tty: при `curl … | bash` stdin занят самим скриптом.
+# Без терминала (или с --yes) вопросов нет: --domain или <IP>.sslip.io.
+ask() {
+  REPLY=""
+  [ -z "$ASSUME_YES" ] && { : < /dev/tty; } 2>/dev/null || return 1
+  printf '%s' "$1" > /dev/tty
+  IFS= read -r REPLY < /dev/tty || REPLY=""
+}
+if [ -z "$DOMAIN" ] && [ -z "$ASSUME_YES" ] && { : < /dev/tty; } 2>/dev/null; then
+  cat > /dev/tty <<TXT
+
+  Домен панели и подписок. Сертификат Let's Encrypt панель получит сама и будет сама продлевать
+  (за 30 дней до окончания, без cron и certbot). Нужны A-запись домена на IP $IP
+  (в Cloudflare — серое облако, без проксирования) и открытый порт 80.
+  Без своего домена — бесплатное имя $SSLIP (тоже с настоящим сертификатом).
+
+TXT
+  CAND=""
+  while :; do
+    if [ -z "$CAND" ]; then
+      ask "  Свой домен (Enter — $SSLIP): "
+      CAND="$(printf '%s' "$REPLY" | tr 'A-Z' 'a-z' | tr -d ' ')"
+      CAND="${CAND#http://}"; CAND="${CAND#https://}"; CAND="${CAND%%/*}"
+      [ -n "$CAND" ] || break
+      if ! printf '%s' "$CAND" | grep -Eq '^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$'; then
+        echo "  «$CAND» не похоже на домен (пример: panel.example.com)" > /dev/tty; CAND=""; continue
+      fi
+    fi
+    GOT="$(resolved "$CAND")"
+    if [ "$GOT" = "$IP" ]; then
+      DOMAIN="$CAND"
+      if [ -z "$EMAIL" ]; then
+        ask "  E-mail для писем Let's Encrypt о сертификате (Enter — без него): "
+        EMAIL="$(printf '%s' "$REPLY" | tr -d ' ')"
+      fi
+      echo "  ✔ $DOMAIN → $IP" > /dev/tty
+      break
+    fi
+    echo "  $CAND указывает на '${GOT:-ничего}', а IP сервера $IP. Поправьте A-запись (DNS обновляется до нескольких минут)." > /dev/tty
+    ask "  Enter — проверить снова, s — взять $SSLIP, или введите другой домен: "
+    case "$REPLY" in
+      "") sleep 5 ;;
+      s|S) CAND=""; break ;;
+      *) CAND="$(printf '%s' "$REPLY" | tr 'A-Z' 'a-z' | tr -d ' ')"; CAND="${CAND#http://}"; CAND="${CAND#https://}"; CAND="${CAND%%/*}" ;;
+    esac
+  done
+fi
+[ -n "$DOMAIN" ] || DOMAIN="$SSLIP"
+RESOLVED="$(resolved "$DOMAIN")"
 [ "$RESOLVED" = "$IP" ] || die "домен $DOMAIN указывает на '${RESOLVED:-ничего}', а IP сервера $IP — проверьте DNS"
 info "IP сервера: $IP"
 info "домен: $DOMAIN (указывает на $RESOLVED — верно)"
@@ -129,8 +184,12 @@ CFG
 [ -n "$REPO" ] && echo "update_repo: $REPO" >> /etc/nodepanel/panel.yaml
 
 info "создан /etc/nodepanel/panel.yaml"
-/usr/local/bin/nodepanel admin -data /var/lib/nodepanel templates defaults "$SNI" >/dev/null
-info "шаблоны точек подключения: VLESS Reality RAW (443) и XHTTP (8443), маскировка под $SNI"
+/usr/local/bin/nodepanel admin -data /var/lib/nodepanel templates defaults $SNI >/dev/null
+if [ -n "$SNI" ]; then
+  info "шаблоны точек подключения: VLESS Reality RAW (443) и XHTTP (8443), маскировка под $SNI"
+else
+  info "шаблоны точек подключения: VLESS Reality RAW (443) и XHTTP (8443), маскировка под сайт ноды"
+fi
 PASS_LINE="$(/usr/local/bin/nodepanel admin -data /var/lib/nodepanel admin add admin | sed -n 's/^Пароль.*: //p')"
 [ -n "$PASS_LINE" ] || die "не удалось создать администратора"
 info "создан администратор admin"
@@ -148,6 +207,18 @@ ExecStart=/usr/local/bin/nodepanel panel -config /etc/nodepanel/panel.yaml
 Restart=always
 RestartSec=3
 LimitNOFILE=1048576
+# Ограничения: служба не получает новых прав, не видит /home и /root, не меняет ядро.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
 
 [Install]
 WantedBy=multi-user.target
@@ -197,6 +268,7 @@ chmod 600 /root/nodepanel-admin.txt
 printf '\n\033[1;32m✔ Панель установлена\033[0m\n\n'
 printf '  Адрес:   %s\n  Логин:   admin\n  Пароль:  %s\n\n' "$URL_PANEL" "$PASS_LINE"
 echo "  Это же записано в /root/nodepanel-admin.txt (только для root)."
+echo "  Сертификат $DOMAIN: Let's Encrypt, продлевается панелью автоматически (порт 80 должен оставаться открытым)."
 echo "  Дальше: в панели «Ноды» → «Добавить ноду» → выполнить готовую команду на сервере ноды."
 if [ -f /var/run/reboot-required ]; then
   echo
