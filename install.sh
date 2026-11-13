@@ -186,9 +186,9 @@ CFG
 info "создан /etc/nodepanel/panel.yaml"
 /usr/local/bin/nodepanel admin -data /var/lib/nodepanel templates defaults $SNI >/dev/null
 if [ -n "$SNI" ]; then
-  info "шаблоны точек подключения: VLESS Reality RAW (443) и XHTTP (8443), маскировка под $SNI"
+  info "шаблоны точек подключения: VLESS Reality XHTTP (443, основной) и TCP+Vision (8443, запасной), маскировка под $SNI"
 else
-  info "шаблоны точек подключения: VLESS Reality RAW (443) и XHTTP (8443), маскировка под сайт ноды"
+  info "шаблоны точек подключения: VLESS Reality XHTTP (443, основной) и TCP+Vision (8443, запасной), маскировка под сайт ноды"
 fi
 PASS_LINE="$(/usr/local/bin/nodepanel admin -data /var/lib/nodepanel admin add admin | sed -n 's/^Пароль.*: //p')"
 [ -n "$PASS_LINE" ] || die "не удалось создать администратора"
